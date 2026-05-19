@@ -45,7 +45,7 @@ describe('MCP Server Integration', () => {
     const { createServer } = await import('../../src/server.js');
 
     // Create a mock Ollama instance
-    const mockOllama = new Ollama({ host: 'http://localhost:11434' });
+    const mockOllama = new Ollama({ host: 'http://127.0.0.1:11434' });
     server = createServer(mockOllama);
 
     // Create client
