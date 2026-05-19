@@ -32,6 +32,15 @@ export function createServer(ollamaInstance?: Ollama): Server {
 
   const ollama = ollamaInstance || new Ollama(ollamaConfig);
 
+  // Cache discovered tools
+  let cachedTools: any[] | null = null;
+  const getTools = async () => {
+    if (!cachedTools) {
+      cachedTools = await discoverTools();
+    }
+    return cachedTools;
+  };
+
   // Create MCP server
   const server = new Server(
     {
@@ -47,7 +56,7 @@ export function createServer(ollamaInstance?: Ollama): Server {
 
   // Register tool list handler
   server.setRequestHandler(ListToolsRequestSchema, async () => {
-    const tools = await discoverTools();
+    const tools = await getTools();
 
     return {
       tools: tools.map((tool) => ({
@@ -59,12 +68,12 @@ export function createServer(ollamaInstance?: Ollama): Server {
   });
 
   // Register tool call handler
-  server.setRequestHandler(CallToolRequestSchema, async (request) => {
+  server.setRequestHandler(CallToolRequestSchema, async (request, extra) => {
     try {
       const { name, arguments: args } = request.params;
 
-      // Discover all tools
-      const tools = await discoverTools();
+      // Use cached tools
+      const tools = await getTools();
 
       // Find the matching tool
       const tool = tools.find((t) => t.name === name);
@@ -78,9 +87,21 @@ export function createServer(ollamaInstance?: Ollama): Server {
       const format =
         formatArg === 'markdown' ? ResponseFormat.MARKDOWN : ResponseFormat.JSON;
 
+      // Create a scoped Ollama client for this request that respects the AbortSignal
+      const requestOllamaConfig: any = { ...ollamaConfig };
+      if (extra?.signal) {
+        // Inject a custom fetch that merges the MCP abort signal
+        requestOllamaConfig.fetch = (input: any, init?: any) => {
+          // If the MCP client aborts, the signal will trigger and cancel the fetch
+          return fetch(input, { ...init, signal: extra.signal });
+        };
+      }
+      
+      const scopedOllama = new Ollama(requestOllamaConfig);
+
       // Call the tool handler
       const result = await tool.handler(
-        ollama,
+        scopedOllama,
         args as Record<string, unknown>,
         format
       );
