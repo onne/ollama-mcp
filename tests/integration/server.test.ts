@@ -3,6 +3,7 @@ import { Server } from '@modelcontextprotocol/sdk/server/index.js';
 import { InMemoryTransport } from '@modelcontextprotocol/sdk/inMemory.js';
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { Ollama } from 'ollama';
+import { createServer } from '../../src/server.js';
 
 // Mock the Ollama SDK
 vi.mock('ollama', () => {
@@ -40,9 +41,6 @@ describe('MCP Server Integration', () => {
   beforeAll(async () => {
     // Create transport pair
     [serverTransport, clientTransport] = InMemoryTransport.createLinkedPair();
-
-    // Import and create server
-    const { createServer } = await import('../../src/server.js');
 
     // Create a mock Ollama instance
     const mockOllama = new Ollama({ host: 'http://127.0.0.1:11434' });
@@ -121,5 +119,28 @@ describe('MCP Server Integration', () => {
 
     expect(response.isError).toBe(true);
     expect(response.content[0].text).toContain('Unknown tool');
+  });
+});
+
+describe('createServer defaults', () => {
+  it('should instantiate Ollama with IPv4 localhost when no host is provided', async () => {
+    vi.mocked(Ollama).mockClear();
+
+    const originalHost = process.env.OLLAMA_HOST;
+    delete process.env.OLLAMA_HOST;
+
+    try {
+      createServer();
+
+      expect(Ollama).toHaveBeenCalledWith(
+        expect.objectContaining({ host: 'http://127.0.0.1:11434' })
+      );
+    } finally {
+      if (originalHost !== undefined) {
+        process.env.OLLAMA_HOST = originalHost;
+      } else {
+        delete process.env.OLLAMA_HOST;
+      }
+    }
   });
 });
