@@ -3,32 +3,35 @@ import { Server } from '@modelcontextprotocol/sdk/server/index.js';
 import { InMemoryTransport } from '@modelcontextprotocol/sdk/inMemory.js';
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { Ollama } from 'ollama';
+import { CallToolRequestSchema } from '@modelcontextprotocol/sdk/types.js';
 import { createServer } from '../../src/server.js';
 
 // Mock the Ollama SDK
 vi.mock('ollama', () => {
   return {
-    Ollama: class {
-      list = vi.fn().mockResolvedValue({
-        models: [
-          {
-            name: 'llama2:latest',
-            size: 3825819519,
-            digest: 'abc123',
-            modified_at: '2024-01-01T00:00:00Z',
-          },
-        ],
-      });
-      ps = vi.fn().mockResolvedValue({
-        models: [
-          {
-            name: 'llama2:latest',
-            size: 3825819519,
-            size_vram: 3825819519,
-          },
-        ],
-      });
-    },
+    Ollama: vi.fn().mockImplementation(function () {
+      return {
+        list: vi.fn().mockResolvedValue({
+          models: [
+            {
+              name: 'llama2:latest',
+              size: 3825819519,
+              digest: 'abc123',
+              modified_at: '2024-01-01T00:00:00Z',
+            },
+          ],
+        }),
+        ps: vi.fn().mockResolvedValue({
+          models: [
+            {
+              name: 'llama2:latest',
+              size: 3825819519,
+              size_vram: 3825819519,
+            },
+          ],
+        }),
+      };
+    }),
   };
 });
 
@@ -120,6 +123,73 @@ describe('MCP Server Integration', () => {
     expect(response.isError).toBe(true);
     expect(response.content[0].text).toContain('Unknown tool');
   });
+
+  it('should inject AbortSignal into scoped Ollama fetch on tool call', async () => {
+    const setRequestHandlerSpy = vi.spyOn(Server.prototype, 'setRequestHandler');
+    
+    createServer();
+    
+    const callToolCall = setRequestHandlerSpy.mock.calls.find(call => call[0] === CallToolRequestSchema);
+    expect(callToolCall).toBeDefined();
+    
+    const handler = callToolCall![1];
+    
+    vi.clearAllMocks();
+    
+    const controller = new AbortController();
+    const mockAbortSignal = controller.signal;
+    
+    const request = {
+      params: {
+        name: 'ollama_list',
+        arguments: { format: 'json' }
+      }
+    };
+    
+    const extra = { signal: mockAbortSignal };
+    
+    await handler(request as any, extra as any);
+    
+    expect(Ollama).toHaveBeenCalledTimes(1);
+    const ollamaConfig = vi.mocked(Ollama).mock.calls[0][0];
+    
+    expect(ollamaConfig.fetch).toBeDefined();
+    
+    const globalFetchSpy = vi.spyOn(global, 'fetch').mockResolvedValue(new Response());
+    
+    await ollamaConfig.fetch!('http://localhost:11434/api/tags', { method: 'GET' });
+    
+    expect(globalFetchSpy).toHaveBeenCalledWith('http://localhost:11434/api/tags', expect.objectContaining({
+      method: 'GET',
+      signal: mockAbortSignal
+    }));
+    
+    globalFetchSpy.mockRestore();
+    setRequestHandlerSpy.mockRestore();
+  });
+
+  it('should handle pre-aborted requests correctly', async () => {
+    const setRequestHandlerSpy = vi.spyOn(Server.prototype, 'setRequestHandler');
+    createServer();
+    const callToolCall = setRequestHandlerSpy.mock.calls.find(call => call[0] === CallToolRequestSchema);
+    const handler = callToolCall![1];
+    
+    const controller = new AbortController();
+    controller.abort();
+    
+    const request = {
+      params: { name: 'ollama_list', arguments: {} }
+    };
+    
+    const extra = { signal: controller.signal };
+    
+    const result = await handler(request as any, extra as any);
+    
+    expect(result.isError).toBe(true);
+    expect(result.content[0].text).toContain('Request cancelled');
+    
+    setRequestHandlerSpy.mockRestore();
+  });
 });
 
 describe('createServer defaults', () => {
@@ -130,11 +200,23 @@ describe('createServer defaults', () => {
     delete process.env.OLLAMA_HOST;
 
     try {
+      const srv = createServer();
+      const setRequestHandlerSpy = vi.spyOn(Server.prototype, 'setRequestHandler');
+      // Force the handler to register
       createServer();
+      const callToolCall = setRequestHandlerSpy.mock.calls.find(call => call[0] === CallToolRequestSchema);
+      const handler = callToolCall![1];
+      
+      const request = { params: { name: 'ollama_list', arguments: {} } };
+      const extra = { signal: new AbortController().signal };
+      
+      await handler(request as any, extra as any);
 
       expect(Ollama).toHaveBeenCalledWith(
         expect.objectContaining({ host: 'http://127.0.0.1:11434' })
       );
+      
+      setRequestHandlerSpy.mockRestore();
     } finally {
       if (originalHost !== undefined) {
         process.env.OLLAMA_HOST = originalHost;
